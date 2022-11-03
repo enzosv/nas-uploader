@@ -3,6 +3,7 @@ module github.com/enzosv/nas-uploader
 go 1.18
 
 require (
+	github.com/gorilla/websocket v1.5.0
 	github.com/joho/godotenv v1.4.0
 	google.golang.org/api v0.102.0
 )

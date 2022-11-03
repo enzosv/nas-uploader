@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	"google.golang.org/api/drive/v3"
 )
@@ -37,6 +38,7 @@ func main() {
 
 	http.HandleFunc("/files", ListFilesHandler())
 	http.HandleFunc("/upload", UploadHandler(driveService))
+	http.Handle("/", http.FileServer(http.Dir("./web")))
 	fmt.Println("serving at localhost:8080")
 	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -74,6 +76,15 @@ func ListFilesHandler() http.HandlerFunc {
 
 func UploadHandler(driveService *drive.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var upgrader = websocket.Upgrader{} // use default options
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serveError(w, err, http.StatusInternalServerError)
+			return
+		}
+		defer log.Println("socket closed")
+		defer c.Close()
+
 		path := r.URL.Query().Get("path")
 		ctx := r.Context()
 		channels := Channels{make(chan error), make(chan float64), make(chan FileInfo)}
@@ -82,22 +93,21 @@ func UploadHandler(driveService *drive.Service) http.HandlerFunc {
 		log.Println("uploading", path)
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case err := <-channels.ErrChan:
 				log.Println(err)
-				serveError(w, err, http.StatusInternalServerError)
-				return
+				response := map[string]string{}
+				response["error"] = err.Error()
+				c.WriteJSON(response)
 			case progress := <-channels.ProgressChan:
-				fmt.Printf("%.2f%% Uploaded\r", progress)
-				//TODO: socket for progress
+				response := map[string]float64{}
+				response["progress"] = progress
+				c.WriteJSON(response)
 			case uploaded := <-channels.UploadedChan:
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				err := json.NewEncoder(w).Encode(uploaded)
-				if err != nil {
-					log.Println(err)
-					serveError(w, err, http.StatusInternalServerError)
-					return
-				}
+				response := map[string]FileInfo{}
+				response["uploaded"] = uploaded
+				c.WriteJSON(response)
 				log.Println("uploaded", path)
 				return
 			}
@@ -112,11 +122,17 @@ func listFiles(root string) ([]FileInfo, error) {
 			log.Println(err)
 			return nil
 		}
+		name := info.Name()
+		if strings.HasPrefix(name, ".") {
+			return nil
+		}
+		if strings.HasPrefix(path, ".") {
+			return nil
+		}
 		if info.IsDir() {
 			return nil
 		}
-		name := info.Name()
-		if strings.HasPrefix(info.Name(), ".") {
+		if strings.HasPrefix(name, ".") {
 			return nil
 		}
 		files = append(files, FileInfo{path, name, byteCountSI(info.Size())})

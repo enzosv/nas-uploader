@@ -22,9 +22,10 @@ type Channels struct {
 }
 
 type FileInfo struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
-	Size string `json:"size"`
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Size     string `json:"size"`
+	UploadID string `json:"upload_id"`
 }
 
 func main() {
@@ -36,7 +37,7 @@ func main() {
 		log.Panic(err)
 	}
 
-	http.HandleFunc("/files", ListFilesHandler())
+	http.HandleFunc("/files", ListFilesHandler(driveService))
 	http.HandleFunc("/upload", UploadHandler(driveService))
 	http.Handle("/", http.FileServer(http.Dir("./web")))
 	fmt.Println("serving at localhost:8080")
@@ -56,17 +57,64 @@ func serveError(w http.ResponseWriter, err error, status int) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func ListFilesHandler() http.HandlerFunc {
+func ListFilesHandler(driveService *drive.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		files, err := listFiles(os.Getenv("ROOT"))
-		if err != nil {
-			log.Println(err)
-			serveError(w, err, http.StatusInternalServerError)
-			return
+		errchan := make(chan error)
+		fileschan := make(chan []FileInfo)
+		uploadschan := make(chan []FileInfo)
+		go func() {
+			files, err := listFiles(os.Getenv("ROOT"))
+			if err != nil {
+				errchan <- err
+				return
+			}
+			fileschan <- files
+		}()
+		go func() {
+			files, err := listUploaded(driveService)
+			if err != nil {
+				errchan <- err
+				return
+			}
+			uploadschan <- files
+		}()
+		var local []FileInfo
+		var online []FileInfo
+	loop:
+		for {
+			select {
+			case err := <-errchan:
+				log.Println(err)
+				serveError(w, err, http.StatusInternalServerError)
+				return
+			case files := <-fileschan:
+				local = files
+				if online != nil {
+					break loop
+				}
+			case files := <-uploadschan:
+				online = files
+				if local != nil {
+					break loop
+				}
+			}
+		}
+		for _, o := range online {
+			found := false
+			for i, f := range local {
+				if f.Name == o.Name && f.Size == o.Size {
+					local[i] = o
+					found = true
+					break
+				}
+			}
+			if !found {
+				local = append(local, o)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		err = json.NewEncoder(w).Encode(files)
+		err := json.NewEncoder(w).Encode(local)
 		if err != nil {
 			log.Println(err)
 			serveError(w, err, http.StatusInternalServerError)
@@ -135,7 +183,7 @@ func listFiles(root string) ([]FileInfo, error) {
 		if strings.HasPrefix(name, ".") {
 			return nil
 		}
-		files = append(files, FileInfo{path, name, byteCountSI(info.Size())})
+		files = append(files, FileInfo{path, name, byteCountSI(info.Size()), ""})
 		return nil
 	})
 	return files, err
@@ -163,7 +211,7 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 	upload := driveService.Files.
 		Create(&upf).
 		ResumableMedia(ctx, file, info.Size(), mime).
-		Fields("webViewLink").
+		Fields("webViewLink, id").
 		ProgressUpdater(func(current, total int64) {
 			progress := float64(current*100) / float64(total)
 			channels.ProgressChan <- progress
@@ -173,21 +221,23 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		channels.ErrChan <- err
 		return
 	}
-	channels.UploadedChan <- FileInfo{df.WebViewLink, info.Name(), byteCountSI(info.Size())}
+	channels.UploadedChan <- FileInfo{df.WebViewLink, info.Name(), byteCountSI(info.Size()), df.Id}
 }
 
-func listUploaded(driveService *drive.Service) {
-	list, err := driveService.Files.List().Fields("files(webViewLink, name, id, parents)").Do()
+func listUploaded(driveService *drive.Service) ([]FileInfo, error) {
+	list, err := driveService.Files.List().Fields("files(webViewLink, name, id, size)").Do()
 	if err != nil {
-		log.Panic(err)
+		return nil, err
 	}
+	var files []FileInfo
 	for _, f := range list.Files {
-		log.Println(f.Name, f.Parents, f.WebViewLink)
+		files = append(files, FileInfo{f.WebViewLink, f.Name, byteCountSI(f.Size), f.Id})
 		// err = driveService.Files.Delete(f.Id).Do()
 		// if err != nil {
 		// 	log.Panic(err)
 		// }
 	}
+	return files, nil
 }
 
 func getMime(ouput *os.File) (string, error) {

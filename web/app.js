@@ -1,4 +1,5 @@
 var files;
+var ws;
 async function getFiles() {
   const response = await fetch("/files");
   files = await response.json();
@@ -9,49 +10,69 @@ async function getFiles() {
       {
         data: "name",
         render: function (name, type, row) {
+          const title = `${name} (${humanFileSize(row.size)})`;
           if (row.progress) {
-            return `Uploading ${name} ${row.progress}%`;
+            return `Uploading ${title} ${row.progress}%`;
           }
-          const index = files.findIndex((x) => x.path === row.path);
-          return `<button onclick="upload('${row.path}', ${index}); return false;">${name} (${row.size})</button>`;
+          if (row.upload_id) {
+            return `<a href=${row.path}>${title}</a>`;
+          }
+          return `<button onclick="upload('${row.path}'); return false;">${title}</button>`;
         },
       },
     ],
   });
 }
 
-function upload(path, index) {
-  if (path.includes("drive.google.com")) {
-    window.open(path);
-    return;
-  }
+async function upload(path) {
+  const response = await fetch("/upload?path=" + path);
+  const data = await response.json();
+  console.log(data);
+}
+
+function socket() {
   // Create WebSocket connection.
-  const ws = new WebSocket("ws://localhost:8080/upload?path=" + path);
+  ws = new WebSocket("ws://localhost:8080/socket");
   ws.addEventListener("open", function () {
-    console.log("uploading", path);
+    console.log("socket opened");
   });
 
   ws.addEventListener("close", function () {
-    console.log(path, "upload ended");
+    console.log("socket closed");
   });
 
-  const row = $("#table").DataTable().row(index);
+  // const row = $("#table").DataTable().row(index);
   ws.addEventListener("message", function (message) {
+    console.log(message);
     const data = JSON.parse(message.data);
-    if (data.error) {
-      console.error(data.error);
-    }
-
-    if (data.progress) {
-      console.log(data.progress);
-      var rowdata = files[index];
-      rowdata.progress = data.progress;
-      row.data(rowdata).invalidate();
-    }
-    if (data.uploaded) {
-      ws.close();
-      files[index] = data.uploaded;
-      row.data(data.uploaded).invalidate();
-    }
+    const index = files.findIndex(
+      (x) => x.size === data.size && x.name === data.name
+    );
+    files[index] = data;
+    $("#table").DataTable().row(index).data(data).draw();
   });
+}
+
+function humanFileSize(bytes, si = true, dp = 1) {
+  const thresh = si ? 1000 : 1024;
+
+  if (Math.abs(bytes) < thresh) {
+    return bytes + " B";
+  }
+
+  const units = si
+    ? ["kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"]
+    : ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"];
+  let u = -1;
+  const r = 10 ** dp;
+
+  do {
+    bytes /= thresh;
+    ++u;
+  } while (
+    Math.round(Math.abs(bytes) * r) / r >= thresh &&
+    u < units.length - 1
+  );
+
+  return bytes.toFixed(dp) + " " + units[u];
 }

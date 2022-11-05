@@ -17,16 +17,19 @@ import (
 
 type Channels struct {
 	ErrChan      chan error
-	ProgressChan chan float64
+	ProgressChan chan FileInfo
 	UploadedChan chan FileInfo
 }
 
 type FileInfo struct {
-	Path     string `json:"path"`
-	Name     string `json:"name"`
-	Size     string `json:"size"`
-	UploadID string `json:"upload_id"`
+	Path     string  `json:"path"`
+	Name     string  `json:"name"`
+	Size     int64   `json:"size"`
+	UploadID string  `json:"upload_id"`
+	Progress float64 `json:"upload_progress"`
 }
+
+var uploading []string
 
 func main() {
 	err := godotenv.Load()
@@ -36,9 +39,12 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
+	channels := Channels{make(chan error), make(chan FileInfo), make(chan FileInfo)}
 
+	http.HandleFunc("/socket", SocketHandler(channels))
 	http.HandleFunc("/files", ListFilesHandler(driveService))
-	http.HandleFunc("/upload", UploadHandler(driveService))
+	http.HandleFunc("/upload", UploadHandler(ctx, driveService, channels))
+	// TODO: delete
 	http.Handle("/", http.FileServer(http.Dir("./web")))
 	fmt.Println("serving at localhost:8080")
 	err = http.ListenAndServe(":8080", nil)
@@ -63,7 +69,7 @@ func ListFilesHandler(driveService *drive.Service) http.HandlerFunc {
 		fileschan := make(chan []FileInfo)
 		uploadschan := make(chan []FileInfo)
 		go func() {
-			files, err := listFiles(os.Getenv("ROOT"))
+			files, err := listFiles(strings.Split(os.Getenv("ROOT"), ","))
 			if err != nil {
 				errchan <- err
 				return
@@ -122,70 +128,83 @@ func ListFilesHandler(driveService *drive.Service) http.HandlerFunc {
 	}
 }
 
-func UploadHandler(driveService *drive.Service) http.HandlerFunc {
+func SocketHandler(channels Channels) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var upgrader = websocket.Upgrader{} // use default options
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			log.Println(err)
 			serveError(w, err, http.StatusInternalServerError)
 			return
 		}
+		log.Println("socket opened")
 		defer log.Println("socket closed")
 		defer c.Close()
-
-		path := r.URL.Query().Get("path")
-		ctx := r.Context()
-		channels := Channels{make(chan error), make(chan float64), make(chan FileInfo)}
-
-		go upload(ctx, channels, driveService, path)
-		log.Println("uploading", path)
 		for {
 			select {
-			case <-ctx.Done():
-				return
 			case err := <-channels.ErrChan:
 				log.Println(err)
 				response := map[string]string{}
 				response["error"] = err.Error()
 				c.WriteJSON(response)
 			case progress := <-channels.ProgressChan:
-				response := map[string]float64{}
-				response["progress"] = progress
-				c.WriteJSON(response)
+				fmt.Printf("%s: %.2f\r", progress.Name, progress.Progress)
+				c.WriteJSON(progress)
 			case uploaded := <-channels.UploadedChan:
-				response := map[string]FileInfo{}
-				response["uploaded"] = uploaded
-				c.WriteJSON(response)
-				log.Println("uploaded", path)
-				return
+				c.WriteJSON(uploaded)
+				// TODO: remove uploaded from uploading
 			}
 		}
 	}
 }
 
-func listFiles(root string) ([]FileInfo, error) {
-	var files []FileInfo
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+func UploadHandler(ctx context.Context, driveService *drive.Service, channels Channels) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Query().Get("path")
+		log.Println(path)
+		// ctx := r.Context()
+		uploading = append(uploading, path)
+		go upload(ctx, channels, driveService, path)
+		log.Println("uploading", path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		response := map[string]string{}
+		response["message"] = "Uploading " + path
+		err := json.NewEncoder(w).Encode(response)
 		if err != nil {
 			log.Println(err)
-			return nil
+			serveError(w, err, http.StatusInternalServerError)
 		}
-		name := info.Name()
-		if strings.HasPrefix(name, ".") {
+	}
+}
+
+func listFiles(roots []string) ([]FileInfo, error) {
+	var files []FileInfo
+	var err error
+	for _, root := range roots {
+		err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				log.Println(err)
+				return nil
+			}
+			name := info.Name()
+			if strings.HasPrefix(name, ".") {
+				return nil
+			}
+			if strings.HasPrefix(path, ".") {
+				return nil
+			}
+			if info.IsDir() {
+				return nil
+			}
+			if strings.HasPrefix(name, ".") {
+				return nil
+			}
+			files = append(files, FileInfo{path, name, info.Size(), "", 0})
 			return nil
-		}
-		if strings.HasPrefix(path, ".") {
-			return nil
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if strings.HasPrefix(name, ".") {
-			return nil
-		}
-		files = append(files, FileInfo{path, name, byteCountSI(info.Size()), ""})
-		return nil
-	})
+		})
+	}
+
 	return files, err
 }
 
@@ -202,11 +221,17 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		channels.ErrChan <- err
 		return
 	}
-	info, _ := file.Stat()
+	info, err := file.Stat()
+	if err != nil {
+		channels.ErrChan <- err
+		return
+	}
+	name := info.Name()
+	size := info.Size()
 
 	upf := drive.File{}
 	upf.Parents = []string{os.Getenv("FOLDER_ID")}
-	upf.Name = info.Name()
+	upf.Name = name
 
 	upload := driveService.Files.
 		Create(&upf).
@@ -214,14 +239,14 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		Fields("webViewLink, id").
 		ProgressUpdater(func(current, total int64) {
 			progress := float64(current*100) / float64(total)
-			channels.ProgressChan <- progress
+			channels.ProgressChan <- FileInfo{path, name, size, "", progress}
 		})
 	df, err := upload.Do()
 	if err != nil {
 		channels.ErrChan <- err
 		return
 	}
-	channels.UploadedChan <- FileInfo{df.WebViewLink, info.Name(), byteCountSI(info.Size()), df.Id}
+	channels.UploadedChan <- FileInfo{df.WebViewLink, name, size, df.Id, 100}
 }
 
 func listUploaded(driveService *drive.Service) ([]FileInfo, error) {
@@ -231,7 +256,7 @@ func listUploaded(driveService *drive.Service) ([]FileInfo, error) {
 	}
 	var files []FileInfo
 	for _, f := range list.Files {
-		files = append(files, FileInfo{f.WebViewLink, f.Name, byteCountSI(f.Size), f.Id})
+		files = append(files, FileInfo{f.WebViewLink, f.Name, f.Size, f.Id, 100})
 		// err = driveService.Files.Delete(f.Id).Do()
 		// if err != nil {
 		// 	log.Panic(err)
@@ -250,18 +275,4 @@ func getMime(ouput *os.File) (string, error) {
 	}
 	contentType := http.DetectContentType(buf)
 	return contentType, nil
-}
-
-func byteCountSI(b int64) string {
-	const unit = 1000
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB",
-		float64(b)/float64(div), "kMGTPE"[exp])
 }

@@ -275,12 +275,15 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 }
 
 func listUploaded(driveService *drive.Service) ([]FileInfo, error) {
-	list, err := driveService.Files.List().Fields("files(webViewLink, name, id, size)").Do()
+	list, err := driveService.Files.List().Fields("files(webViewLink, name, id, size, mimeType)").Do()
 	if err != nil {
 		return nil, err
 	}
 	var files []FileInfo
 	for _, f := range list.Files {
+		if f.MimeType == "application/vnd.google-apps.folder" {
+			continue
+		}
 		files = append(files, FileInfo{f.WebViewLink, f.Name, f.Size, f.Id, 100})
 		// err = driveService.Files.Delete(f.Id).Do()
 		// if err != nil {

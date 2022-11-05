@@ -42,7 +42,7 @@ func main() {
 	channels := Channels{make(chan error), make(chan FileInfo), make(chan FileInfo)}
 
 	http.HandleFunc("/socket", SocketHandler(channels))
-	http.HandleFunc("/files", ListFilesHandler(driveService))
+	http.HandleFunc("/files", ListFilesHandler(driveService, channels))
 	http.HandleFunc("/upload", UploadHandler(ctx, driveService, channels))
 	// TODO: delete
 	http.Handle("/", http.FileServer(http.Dir("./web")))
@@ -63,11 +63,34 @@ func serveError(w http.ResponseWriter, err error, status int) {
 	json.NewEncoder(w).Encode(response)
 }
 
-func ListFilesHandler(driveService *drive.Service) http.HandlerFunc {
+func ListFilesHandler(driveService *drive.Service, channels Channels) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		errchan := make(chan error)
 		fileschan := make(chan []FileInfo)
 		uploadschan := make(chan []FileInfo)
+
+		var uploading []FileInfo
+		go func() {
+			for {
+				select {
+				case <-r.Context().Done():
+					break
+				case progress := <-channels.ProgressChan:
+					found := false
+					for i, u := range uploading {
+						if u.Path == progress.Path {
+							u.Progress = progress.Progress
+							uploading[i] = u
+							found = true
+							break
+						}
+					}
+					if !found {
+						uploading = append(uploading, progress)
+					}
+				}
+			}
+		}()
 		go func() {
 			files, err := listFiles(strings.Split(os.Getenv("ROOT"), ","))
 			if err != nil {
@@ -105,17 +128,19 @@ func ListFilesHandler(driveService *drive.Service) http.HandlerFunc {
 				}
 			}
 		}
-		for _, o := range online {
-			found := false
-			for i, f := range local {
-				if f.Name == o.Name && f.Size == o.Size {
-					local[i] = o
-					found = true
-					break
+		for i, l := range local {
+			for _, u := range uploading {
+				if u.Progress >= 100 {
+					continue
+				}
+				if u.Path == l.Path {
+					local[i] = u
 				}
 			}
-			if !found {
-				local = append(local, o)
+			for _, o := range online {
+				if o.Name == l.Name && o.Size == l.Size {
+					local[i] = o
+				}
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

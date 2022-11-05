@@ -12,10 +12,10 @@ async function getFiles() {
         render: function (name, type, row) {
           const title = `${name} (${humanFileSize(row.size)})`;
           if (row.upload_id || row.upload_progress >= 100) {
-            return `<a href=${row.path}>${title}</a>`;
+            return `<a href=${row.path}>${title}</a> <button onclick="del('${row.upload_id}')"; return false;>Delete</button>`;
           }
           if (row.upload_progress > 0) {
-            return `Uploading ${title} ${row.upload_progress}%`;
+            return `Uploading ${title} ${row.upload_progress.toFixed(1)}%`;
           }
           return `<button onclick="upload('${row.path}'); return false;">${title}</button>`;
         },
@@ -28,10 +28,27 @@ async function upload(path) {
   const url = "/upload?path=" + path;
   const response = await fetch(url);
   const data = await response.json();
+  console.log(url);
   if (data.message) {
     const index = files.findIndex((x) => x.path === path);
     var row = files[index];
     row.upload_progress = 0.01;
+    files[index] = row;
+    $("#table").DataTable().row(index).data(row).invalidate();
+  }
+}
+
+async function del(upload_id) {
+  console.log(upload_id);
+  const url = "/delete?upload_id=" + upload_id;
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.upload_id) {
+    const index = files.findIndex((x) => x.upload_id === upload_id);
+    var row = files[index];
+    row.upload_progress = 0;
+    row.path = ""; // TODO: get old path
+    row.upload_id = "";
     files[index] = row;
     $("#table").DataTable().row(index).data(row).invalidate();
   }

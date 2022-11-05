@@ -44,6 +44,7 @@ func main() {
 	http.HandleFunc("/socket", SocketHandler(channels))
 	http.HandleFunc("/files", ListFilesHandler(driveService, channels))
 	http.HandleFunc("/upload", UploadHandler(ctx, driveService, channels))
+	http.HandleFunc("/delete", DeleteHandler(driveService))
 	// TODO: delete
 	http.Handle("/", http.FileServer(http.Dir("./web")))
 	fmt.Println("serving at localhost:8080")
@@ -61,6 +62,22 @@ func serveError(w http.ResponseWriter, err error, status int) {
 	w.WriteHeader(status)
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func DeleteHandler(driveService *drive.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uploadID := r.URL.Query().Get("upload_id")
+		err := driveService.Files.Delete(uploadID).Do()
+		if err != nil {
+			serveError(w, err, http.StatusInternalServerError)
+			return
+		}
+		response := map[string]string{}
+		response["upload_id"] = uploadID
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	}
 }
 
 func ListFilesHandler(driveService *drive.Service, channels Channels) http.HandlerFunc {
@@ -137,10 +154,18 @@ func ListFilesHandler(driveService *drive.Service, channels Channels) http.Handl
 					local[i] = u
 				}
 			}
-			for _, o := range online {
+		}
+		for _, o := range online {
+			found := false
+			for i, l := range local {
 				if o.Name == l.Name && o.Size == l.Size {
 					local[i] = o
+					found = true
+					break
 				}
+			}
+			if !found {
+				local = append(local, o)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

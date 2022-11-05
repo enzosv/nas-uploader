@@ -11,7 +11,7 @@ async function getFiles() {
         data: "name",
         render: function (name, type, row) {
           const title = `${name} (${humanFileSize(row.size)})`;
-          if (row.upload_id) {
+          if (row.upload_id || row.upload_progress >= 100) {
             return `<a href=${row.path}>${title}</a>`;
           }
           if (row.upload_progress > 0) {

@@ -277,7 +277,7 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		return
 	}
 	size := info.Size()
-	err = pruneUploaded(driveService, FOLDER_LIMIT-size)
+	err = pruneUploaded(driveService, size)
 	if err != nil {
 		channels.ErrChan <- err
 		return

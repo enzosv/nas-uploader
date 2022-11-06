@@ -8,12 +8,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	"google.golang.org/api/drive/v3"
 )
+
+const FOLDER_LIMIT int64 = 5e+9
 
 type Channels struct {
 	ErrChan      chan error
@@ -28,8 +32,6 @@ type FileInfo struct {
 	UploadID string  `json:"upload_id"`
 	Progress float64 `json:"upload_progress"`
 }
-
-var uploading []string
 
 func main() {
 	err := godotenv.Load()
@@ -69,6 +71,7 @@ func DeleteHandler(driveService *drive.Service) http.HandlerFunc {
 		uploadID := r.URL.Query().Get("upload_id")
 		err := driveService.Files.Delete(uploadID).Do()
 		if err != nil {
+			log.Println(err)
 			serveError(w, err, http.StatusInternalServerError)
 			return
 		}
@@ -202,7 +205,6 @@ func SocketHandler(channels Channels) http.HandlerFunc {
 				c.WriteJSON(progress)
 			case uploaded := <-channels.UploadedChan:
 				c.WriteJSON(uploaded)
-				// TODO: remove uploaded from uploading
 			}
 		}
 	}
@@ -211,9 +213,7 @@ func SocketHandler(channels Channels) http.HandlerFunc {
 func UploadHandler(ctx context.Context, driveService *drive.Service, channels Channels) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Query().Get("path")
-		log.Println(path)
 		// ctx := r.Context()
-		uploading = append(uploading, path)
 		go upload(ctx, channels, driveService, path)
 		log.Println("uploading", path)
 		w.Header().Set("Content-Type", "application/json")
@@ -276,8 +276,14 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		channels.ErrChan <- err
 		return
 	}
-	name := info.Name()
 	size := info.Size()
+	err = pruneUploaded(driveService, FOLDER_LIMIT-size)
+	if err != nil {
+		channels.ErrChan <- err
+		return
+	}
+
+	name := info.Name()
 
 	upf := drive.File{}
 	upf.Parents = []string{os.Getenv("FOLDER_ID")}
@@ -285,11 +291,11 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 
 	upload := driveService.Files.
 		Create(&upf).
-		ResumableMedia(ctx, file, info.Size(), mime).
+		ResumableMedia(ctx, file, size, mime).
 		Fields("webViewLink, id").
 		ProgressUpdater(func(current, total int64) {
 			progress := float64(current*100) / float64(total)
-			channels.ProgressChan <- FileInfo{path, name, size, "", progress}
+			channels.ProgressChan <- FileInfo{path, name, total, "", progress}
 		})
 	df, err := upload.Do()
 	if err != nil {
@@ -297,6 +303,51 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		return
 	}
 	channels.UploadedChan <- FileInfo{df.WebViewLink, name, size, df.Id, 100}
+}
+
+func pruneUploaded(driveService *drive.Service, required int64) error {
+	list, err := driveService.Files.List().Fields("files(name, id, size, mimeType, createdTime)").Do()
+	if err != nil {
+		return err
+	}
+	var files []*drive.File
+	var consumed int64
+	for _, f := range list.Files {
+		if f.MimeType == "application/vnd.google-apps.folder" {
+			continue
+		}
+		consumed += f.Size
+		files = append(files, f)
+	}
+	if consumed+required < FOLDER_LIMIT {
+		// no need to delete
+		return nil
+	}
+	// delete older first
+	sort.Slice(files, func(i, j int) bool {
+		a, err := time.Parse(time.RFC3339, files[i].CreatedTime)
+		if err != nil {
+			return false
+		}
+		b, err := time.Parse(time.RFC3339, files[j].CreatedTime)
+		if err != nil {
+			return false
+		}
+		return a.Unix() < b.Unix()
+	})
+	for _, f := range files {
+		size := f.Size
+		err = driveService.Files.Delete(f.Id).Do()
+		if err != nil {
+			return err
+		}
+		consumed -= size
+		if consumed+required < FOLDER_LIMIT {
+			return nil
+		}
+	}
+	// not enough was deleted
+	return nil
 }
 
 func listUploaded(driveService *drive.Service) ([]FileInfo, error) {

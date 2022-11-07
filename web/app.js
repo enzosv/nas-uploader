@@ -102,3 +102,10 @@ function humanFileSize(bytes, si = true, dp = 1) {
 
   return bytes.toFixed(dp) + " " + units[u];
 }
+
+async function getTemp() {
+  const response = await fetch("/temp");
+  const data = await response.json();
+  const temp = data.temp / 1000;
+  document.getElementById("temp").innerHTML = temp + "°C";
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +37,9 @@ type FileInfo struct {
 
 func main() {
 	err := godotenv.Load()
+	if err != nil {
+		log.Panic(err)
+	}
 	ctx := context.Background()
 
 	driveService, err := drive.NewService(ctx)
@@ -47,6 +52,7 @@ func main() {
 	http.HandleFunc("/files", ListFilesHandler(driveService, channels))
 	http.HandleFunc("/upload", UploadHandler(ctx, driveService, channels))
 	http.HandleFunc("/delete", DeleteHandler(driveService))
+	http.HandleFunc("/temp", TempHandler())
 	// TODO: delete
 	http.Handle("/", http.FileServer(http.Dir("./web")))
 	fmt.Println("serving at localhost:8080")
@@ -64,6 +70,23 @@ func serveError(w http.ResponseWriter, err error, status int) {
 	w.WriteHeader(status)
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func TempHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("wat")
+		temp, err := getTemp()
+		if err != nil {
+			log.Println(err)
+			serveError(w, err, http.StatusInternalServerError)
+			return
+		}
+		response := map[string]int{}
+		response["temp"] = temp
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	}
 }
 
 func DeleteHandler(driveService *drive.Service) http.HandlerFunc {
@@ -379,4 +402,21 @@ func getMime(ouput *os.File) (string, error) {
 	}
 	contentType := http.DetectContentType(buf)
 	return contentType, nil
+}
+
+func getTemp() (int, error) {
+	// maybe debian pi specific
+	file, err := os.Open("/sys/class/thermal/thermal_zone0/temp")
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	rd := bufio.NewReader(file)
+	line, err := rd.ReadString('\n')
+	if err != nil {
+		return 0, err
+	}
+	file.Close()
+	temp := strings.Replace(string(line), "\n", "", 1)
+	return strconv.Atoi(temp)
 }

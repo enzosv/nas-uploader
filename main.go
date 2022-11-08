@@ -46,7 +46,7 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	channels := Channels{make(chan error), make(chan FileInfo), make(chan FileInfo)}
+	channels := Channels{make(chan error, 1), make(chan FileInfo, 1), make(chan FileInfo, 1)}
 
 	http.HandleFunc("/socket", SocketHandler(channels))
 	http.HandleFunc("/files", ListFilesHandler(driveService, channels))
@@ -108,16 +108,16 @@ func DeleteHandler(driveService *drive.Service) http.HandlerFunc {
 
 func ListFilesHandler(driveService *drive.Service, channels Channels) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		errchan := make(chan error)
-		fileschan := make(chan []FileInfo)
-		uploadschan := make(chan []FileInfo)
+		errchan := make(chan error, 1)
+		fileschan := make(chan []FileInfo, 1)
+		uploadschan := make(chan []FileInfo, 1)
 
 		var uploading []FileInfo
 		go func() {
 			for {
 				select {
 				case <-r.Context().Done():
-					break
+					return
 				case progress := <-channels.ProgressChan:
 					found := false
 					for i, u := range uploading {
@@ -236,7 +236,6 @@ func SocketHandler(channels Channels) http.HandlerFunc {
 func UploadHandler(ctx context.Context, driveService *drive.Service, channels Channels) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Query().Get("path")
-		// ctx := r.Context()
 		go upload(ctx, channels, driveService, path)
 		log.Println("uploading", path)
 		w.Header().Set("Content-Type", "application/json")

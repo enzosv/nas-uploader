@@ -299,7 +299,7 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 		return
 	}
 	size := info.Size()
-	err = pruneUploaded(driveService, size)
+	_, err = pruneUploaded(driveService, size)
 	if err != nil {
 		channels.ErrChan <- err
 		return
@@ -327,10 +327,10 @@ func upload(ctx context.Context, channels Channels, driveService *drive.Service,
 	channels.UploadedChan <- FileInfo{df.WebViewLink, name, size, df.Id, 100}
 }
 
-func pruneUploaded(driveService *drive.Service, required int64) error {
+func pruneUploaded(driveService *drive.Service, required int64) ([]FileInfo, error) {
 	list, err := driveService.Files.List().Fields("files(name, id, size, mimeType, createdTime)").Do()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var files []*drive.File
 	var consumed int64
@@ -343,7 +343,7 @@ func pruneUploaded(driveService *drive.Service, required int64) error {
 	}
 	if consumed+required < FOLDER_LIMIT {
 		// no need to delete
-		return nil
+		return nil, nil
 	}
 	// delete older first
 	sort.Slice(files, func(i, j int) bool {
@@ -357,19 +357,21 @@ func pruneUploaded(driveService *drive.Service, required int64) error {
 		}
 		return a.Unix() < b.Unix()
 	})
+	var deleted []FileInfo
 	for _, f := range files {
 		size := f.Size
 		err = driveService.Files.Delete(f.Id).Do()
 		if err != nil {
-			return err
+			return deleted, err
 		}
+		deleted = append(deleted, FileInfo{"", f.Name, size, "", 0})
 		consumed -= size
 		if consumed+required < FOLDER_LIMIT {
-			return nil
+			return deleted, nil
 		}
 	}
 	// not enough was deleted
-	return nil
+	return deleted, nil
 }
 
 func listUploaded(driveService *drive.Service) ([]FileInfo, error) {
